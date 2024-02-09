@@ -1,7 +1,7 @@
 ---
 title: "Lab 3: Depth-Damage Models"
 subtitle: "DataFrames and Distributions"
-author: "Your Name"
+author: "Grant Parajuli (gap6)"
 date: 2024-01-26
 week: 3
 categories: [Lab]
@@ -25,19 +25,19 @@ format:
 
     # YOU CAN DO PDF OR DOCX BUT NOT BOTH
     # IF YOU UNCOMMENT docx, COMMENT OR DELETE pdf
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
-        number-sections: true
-        code-line-numbers: true
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
 
-    #docx: 
-    #    toc: true
-    #    fig-format: png
-    #    number-sections: true
-    #    code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
 
 date-format: "ddd., MMM. D"
 ---
@@ -57,9 +57,125 @@ Plots.default(; margin=6Plots.mm)
 ```
 
 # Site information
+I chose the Galveston Pier 21 data.
+
+For a building, I chose Willie G's Seafood and Steaks at roughly 29°18'33.6"N 94°47'34.4"W. Elevation estimate was 9.3ft.
 
 # Depth-Damage
+I chose the depth-damage function from row 823, fnId 504, for use with the structure of a "cafeteria restaurant". I couldn't really find what defined it as cafeteria, but given that the other option was drive-in, cafeteria sounded more appropriate.
+```{julia}
+# Read in data/set up class
+include("depthdamage.jl")
+haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame)
+
+# Select target depth-damage curve, define as dd
+demo_row = @rsubset(
+    haz_fl_dept, :Description == "Cafeteria Restaurant, structure"
+)[
+    1, :,
+]
+dd = DepthDamageData(demo_row)
+
+# Define function to select damage curve and store it as damage_fn
+function get_depth_damage_function(
+    depth_train::Vector{<:T}, dmg_train::Vector{<:AbstractFloat}
+) where {T<:Unitful.Length}
+
+    # interpolate
+    depth_ft = ustrip.(u"ft", depth_train)
+    interp_fn = Interpolations.LinearInterpolation(
+
+        depth_ft,
+        dmg_train;
+
+        extrapolation_bc=Interpolations.Flat(),
+    )
+
+    damage_fn = function (depth::T2) where {T2<:Unitful.Length}
+
+        return interp_fn(ustrip.(u"ft", depth))
+    end
+
+    return damage_fn
+end
+damage_fn = get_depth_damage_function(dd.depths, dd.damages)
+```
+
+```{julia}
+# plot results
+p = let
+
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft"))
+
+    damages = damage_fn.(depths)
+    scatter(
+        depths,
+        damages;
+        xlabel="Flood Depth",
+        ylabel="Damage (%)",
+        label="$(dd.description) ($(dd.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        linewidth=2,
+    )
+end
+```
+This is a fairly resilient building. The example we had previously had nearly 100% damages above 5 feet, while this building only has about 25% damages, with total failure not occuring until a flood above 20 feet. This is interesting as it means it would take a pretty catastrophic flood to be considered 100% failure, while most other floods will fall on the spectrum. There's also a sag in the curve around 10 feet, showing that there's a bigger difference between a 10ft flood and a 13 ft flood than a 7 ft flood and a 10 ft flood (different slopes).
 
 # Expected annual damages
+```{julia}
+gauge_dist = GeneralizedExtremeValue(5, 1.5, 0.1)
+offset = 9.3 # elevation of building
+house_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ)
+samples = rand(house_dist, 10^6).*u"ft"
+damages = damage_fn.(samples)
+expected_dmg = mean(damages)
+```
+
+This value represents the expected annual % damage for Willie G's. By using Monte Carlo, we've basically plugged in the distribution of weather to our damage function and found the average prediction from our damage function, which outputs the percent of the building's value in damage. Here, it looks like annually we would expect only about 1.2% of the building's value in damage.
 
 # Discussion
+
+I'm interested in the difference between structure losses and inventory losses, so I'll repeat this analysis for the inventory at a cafeteria. This depth damage curve has row #808, fnId 340.
+
+```{julia}
+# Get the new depth damage function
+demo_row = @rsubset(
+    haz_fl_dept, :Description == "Cafeteria Restaurant, contents (Inventory)"
+)[
+    1, :,
+]
+dd = DepthDamageData(demo_row)
+damage_fn = get_depth_damage_function(dd.depths, dd.damages)
+
+# plot results
+p = let
+
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft"))
+
+    damages = damage_fn.(depths)
+    scatter(
+        depths,
+        damages;
+        xlabel="Flood Depth",
+        ylabel="Damage (%)",
+        label="$(dd.description) ($(dd.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        linewidth=2,
+    )
+end
+```
+
+The inventory looks significantly more susceptible to damage than the structure is. The depth-damage curve is very steep, and it hits 100% damage with only a few feet of flooding. This makes sense as there's probably a lot of ways and regulation you can use to make a structure more flood-resilient, but making your inventory resilient under comparatively moderate flooding is really hard.
+
+```{julia}
+gauge_dist = GeneralizedExtremeValue(5, 1.5, 0.1)
+offset = 9.3 # elevation of building
+house_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ)
+samples = rand(house_dist, 10^6).*u"ft"
+damages = damage_fn.(samples)
+expected_dmg = mean(damages)
+```
+
+Here, the mean damage% is about 5.2. This is a lot higher than the building damage percent (about 5x), but it's important to remember that structural damage is a lot more expensive since the building is likely more valuable than the inventory. There's also other impacts that this analysis won't tell us. Inventory losses literally mean that the business won't be making money until it buys new inventory, which could be a long timescale, while they could potentially still operate under low levels of structural damage. In this way, the business could lose more money. Depending on how impacted other residents may be by flooding, there also might not be much cash flow into the business, which could represent an additional cost from flooding unrelated to direct damages. Overall, I thought this was interesting!
